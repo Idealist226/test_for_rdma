@@ -25,7 +25,6 @@ struct context {
 	struct ibv_comp_channel *channel;
 	struct ibv_pd		*pd;
 	struct ibv_mr		*mr;
-	struct ibv_dm		*dm;
 	union {
 		struct ibv_cq		*cq;
 		struct ibv_cq_ex	*cq_ex;
@@ -51,7 +50,7 @@ struct dest {
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
 {
 	char tmp[9];
-	__be32 v32;
+	unsigned int v32;
 	int i;
 	uint32_t tmp_gid[4];
 
@@ -353,7 +352,7 @@ static struct context *init_ctx(struct ibv_device *ib_dev, int size,
 
 	if (!ctx->mr) {
 		fprintf(stderr, "Couldn't register MR\n");
-		goto clean_dm;
+		goto clean_pd;
 	}
 
 	ctx->cq_s.cq = ibv_create_cq(ctx->context, rx_depth + 1, NULL,
@@ -418,10 +417,6 @@ clean_cq:
 clean_mr:
 	ibv_dereg_mr(ctx->mr);
 
-clean_dm:
-	if (ctx->dm)
-		ibv_free_dm(ctx->dm);
-
 clean_pd:
 	ibv_dealloc_pd(ctx->pd);
 
@@ -456,13 +451,6 @@ static int close_ctx(struct context *ctx)
 	if (ibv_dereg_mr(ctx->mr)) {
 		fprintf(stderr, "Couldn't deregister MR\n");
 		return 1;
-	}
-
-	if (ctx->dm) {
-		if (ibv_free_dm(ctx->dm)) {
-			fprintf(stderr, "Couldn't free DM\n");
-			return 1;
-		}
 	}
 
 	if (ibv_dealloc_pd(ctx->pd)) {
