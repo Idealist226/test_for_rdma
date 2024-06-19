@@ -23,6 +23,11 @@ enum {
 	SEND_WRID = 2,
 };
 
+enum bench_mode{
+	SINGLE = 1,
+	MULTIPLE = 2,
+};
+
 static int page_size;
 
 struct context {
@@ -40,7 +45,6 @@ struct context {
 	int			 size;
 	int			 send_flags;
 	int			 rx_depth;
-	int			 pending;
 	struct ibv_port_attr     portinfo;
 	uint64_t		 completion_timestamp_mask;
 };
@@ -505,12 +509,12 @@ static int post_recv(struct context *ctx, int n)
 	return i;
 }
 
-static int post_send(struct context *ctx)
+static int post_send(struct context *ctx, int size)
 {
 	struct ibv_sge list;
 	memset(&list, 0, sizeof(list));
 	list.addr	= (uintptr_t) ctx->buf;
-	list.length = ctx->size;
+	list.length = size;
 	list.lkey	= ctx->mr->lkey;
 
 	struct ibv_send_wr wr;
@@ -524,6 +528,27 @@ static int post_send(struct context *ctx)
 	struct ibv_send_wr *bad_wr;
 
 	return ibv_post_send(ctx->qp, &wr, &bad_wr);
+}
+
+int poll_cq(struct context * ctx, int nums){
+	struct ibv_wc wc[nums];
+	uint32_t nums_cqe = 0;
+	while(nums_cqe < nums){
+		int cqes = ibv_poll_cq(ctx->cq_s.cq, nums, wc);
+		if(cqes < 0 ){
+			 fprintf(stderr, "poll cq error. nums_cqe %d\n",nums_cqe);
+			 return -1 ;
+		}
+		nums_cqe += cqes;
+		for(int j  = 0;j < cqes; ++j){
+			if (wc[j].status != IBV_WC_SUCCESS) {
+			    fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+			            ibv_wc_status_str(wc[j].status), wc[j].status, (int)wc[j].wr_id);
+			    return -1;
+			}
+		}
+	}
+	return nums_cqe;
 }
 
 static void usage(const char *argv0)
@@ -542,44 +567,54 @@ static void usage(const char *argv0)
 	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
 	printf("  -l, --sl=<sl>          service level value\n");
 	printf("  -g, --gid-idx=<gid index> local port gid index\n");
+	printf("  -u, --max-size=<size>  max size of message to exchange (default 4096)\n");
 }
 
-int post_send_poll(struct context *ctx, int count)
+int post_send_poll(struct context *ctx, unsigned int iters, unsigned int size)
 {
-	int send = 0, poll = 0;
+	int i, nums_cqe = 0;
 	int wc_count = 50;
 
-	for (send = 0; send < count; send++) {
-		if (post_send(ctx)) {
+	for (i = 1; i <= iters; i++) {
+		if (post_send(ctx, size)) {
 			fprintf(stderr, "Couldn't post send\n");
-			return 1;
+			printf("nums_cqe %d iter %d \n",nums_cqe,i);
+			return -1;
+		}
+		if (i % wc_count == 0) {
+			int ret = poll_cq(ctx, wc_count);
+			if(ret < 0){
+				perror("error in poll");
+				return -1;
+			}
+			nums_cqe += ret;
 		}
 	}
-	for (poll = 0; poll < count;) {
-		int ne = 0;
-		struct ibv_wc wc[wc_count];
-		do {
-			ne = ibv_poll_cq(ctx->cq_s.cq, wc_count, wc);
-			if (ne < 0) {
-				fprintf(stderr, "poll CQ failed %d\n", ne);
-				return 1;
-			}
-		} while (ne < 1);
-		poll += ne;
-	
+	// 还剩下 iters % wc_count 个 cqe 没有 poll
+	if (iters % wc_count != 0) {
+		int ret = poll_cq(ctx, iters % wc_count);
+		if(ret < 0){
+			perror("error in poll");
+			return -1;
+		}
+		nums_cqe += ret;
 	}
-	printf("send = %d, poll = %d\n", send, poll);
 	return 0;
 }
 
-int post_poll_recv(struct context *ctx, int *routs, int iters)
+int post_recv_poll(struct context *ctx, int *routs, unsigned int iters)
 {
-	int rcnt = 0;
+	int rcnt = 0, wc_count = 50, ne;
+	struct ibv_wc wc[wc_count];
+
 	while (rcnt < iters) {
-		int ret;
-		int ne, i;
-		int wc_count = 50;
-		struct ibv_wc wc[wc_count];
+		if (*routs < wc_count) {
+			*routs += post_recv(ctx, ctx->rx_depth - *routs);
+			if (*routs < ctx->rx_depth) {
+				fprintf(stderr, "Couldn't post receive (%d)\n", *routs);
+				return -1;
+			}
+		}
 
 		do {
 			ne = ibv_poll_cq(ctx->cq_s.cq, wc_count, wc);
@@ -589,63 +624,75 @@ int post_poll_recv(struct context *ctx, int *routs, int iters)
 			}
 		} while (ne < 1);
 		rcnt += ne;
-
 		*routs -= ne;
-		if (*routs < wc_count) {
-			*routs += post_recv(ctx, ctx->rx_depth - *routs);
-			if (*routs < ctx->rx_depth) {
-				fprintf(stderr, "Couldn't post receive (%d)\n", *routs);
-				return 1;
-			}
-		}
 	}
-	printf("poll = %d\n", rcnt);
 	return 0;
 }
 
-int test_time(struct context *ctx, char *servername, int size, int iters, int *routs)
+int test_time(struct context *ctx, char *servername, unsigned int max_size, unsigned int iters, int *routs, enum bench_mode mode)
 {
 	struct timeval start, end;
 	int rx_depth = ctx->rx_depth;
-	if (gettimeofday(&start, NULL)) {
-		perror("gettimeofday");
-		return 1;
+	unsigned int size = 0;
+	if(mode == SINGLE) {
+		size = max_size;
+	} else if (mode == MULTIPLE) {
+		size = 2;
 	}
 
-	if (servername) {
-		for (int i = 0; i < iters / rx_depth; i++) {
-			if (post_send_poll(ctx, rx_depth)) {
+	printf("RDMA Send Benchmark  \n");
+	printf("Connection type : %s\n","RC");
+	printf("%-20s %-20s %-20s %-20s\n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)", "Latency(us)");
+	while(size <= max_size){
+		//start send
+		if (gettimeofday(&start, NULL)) {
+			perror("gettimeofday");
+			return -1;
+		}
+		
+		if (servername) {
+			if (post_send_poll(ctx, iters, size) < 0) {
 				fprintf(stderr, "Couldn't post_send_poll1\n");
-				return 1;
+				return -1;
+			}
+		} else {
+			if (post_recv_poll(ctx, routs, iters) < 0) {
+				fprintf(stderr, "Couldn't post_recv_poll\n");
+				return -1;
 			}
 		}
-		if (post_send_poll(ctx, iters % rx_depth)) {
-			fprintf(stderr, "Couldn't post_send_poll2\n");
-			return 1;
+
+		//end send
+		if (gettimeofday(&end, NULL)) {
+			perror("gettimeofday");
+			return -1;
 		}
-	} else {
-		if (post_poll_recv(ctx, routs, iters)) {
-			fprintf(stderr, "Couldn't post_poll_recv\n");
-			return 1;
+
+		// print test time
+		{
+			float usec = (end.tv_sec - start.tv_sec) * 1000000 +
+				(end.tv_usec - start.tv_usec);
+			long long bytes = (long long) size * iters ;
+			double  bw = bytes*8.0/(usec)/1000;
+			printf("%-20d  %-20d   %-20.3lf %-20.0f\n", size, iters, bw, usec);
+		}
+
+		if(size < max_size && size*2 > max_size){
+			size = max_size;
+		}else{
+			size *= 2;
 		}
 	}
-	printf("routs = %d\n", *routs);
+	// {
+	// 	float usec = (end.tv_sec - start.tv_sec) * 1000000 +
+	// 		(end.tv_usec - start.tv_usec);
+	// 	long long bytes = (long long) size * iters;
 
-	if (gettimeofday(&end, NULL)) {
-		perror("gettimeofday");
-		return 1;
-	}
-
-	{
-		float usec = (end.tv_sec - start.tv_sec) * 1000000 +
-			(end.tv_usec - start.tv_usec);
-		long long bytes = (long long) size * iters;
-
-		printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
-		       bytes, usec / 1000000., bytes * 8. / usec);
-		printf("%d iters in %.2f seconds = %.2f usec/iter\n",
-		       iters, usec / 1000000., usec / iters);
-	}
+	// 	printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
+	// 	       bytes, usec / 1000000., bytes * 8. / usec);
+	// 	printf("%d iters in %.2f seconds = %.2f usec/iter\n",
+	// 	       iters, usec / 1000000., usec / iters);
+	// }
 	return 0;
 }
 
@@ -660,7 +707,7 @@ int main(int argc, char *argv[])
 	char                    *servername = NULL;
 	unsigned int             port = 18515;
 	int                      ib_port = 1;
-	unsigned int             size = 4096;
+	unsigned int             size = 0;
 	enum ibv_mtu		 mtu = IBV_MTU_1024;
 	unsigned int             rx_depth = 512;
 	unsigned int             iters = 1000;
@@ -670,6 +717,8 @@ int main(int argc, char *argv[])
 	int                      sl = 0;
 	int			 gidx = -1;
 	char			 gid[33];
+	unsigned int	max_size = 524288;
+	enum bench_mode	mode = MULTIPLE;
 
 	srand48(getpid() * time(NULL));
 
@@ -686,10 +735,11 @@ int main(int argc, char *argv[])
 			{ "iters",    1, NULL, 'n' },
 			{ "sl",       1, NULL, 'l' },
 			{ "gid-idx",  1, NULL, 'g' },
+			{ "max-size", 1, NULL, 'u' },
 			{ NULL,		  0, NULL, 0 }  // 结尾元素，必要以表示数组结束
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:oOPtcjN",
+		c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:g:u:",
 				long_options, NULL);
 
 		if (c == -1)
@@ -718,6 +768,8 @@ int main(int argc, char *argv[])
 
 		case 's':
 			size = strtoul(optarg, NULL, 0);
+			if (size > 0)
+				mode = SINGLE;
 			break;
 
 		case 'm':
@@ -742,6 +794,10 @@ int main(int argc, char *argv[])
 
 		case 'g':
 			gidx = strtol(optarg, NULL, 0);
+			break;
+
+		case 'u':
+			max_size = strtoul(optarg, NULL, 0);
 			break;
 
 		default:
@@ -783,7 +839,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	ctx = init_ctx(ib_dev, size, rx_depth, ib_port);
+	ctx = init_ctx(ib_dev, size<=0?max_size:size, rx_depth, ib_port);
 	if (!ctx)
 		return 1;
 
@@ -839,14 +895,20 @@ int main(int argc, char *argv[])
 					gidx))
 			return 1;
 
-	ctx->pending = RECV_WRID;
-
-	if (test_time(ctx, servername, size, iters, &routs)) {
-		fprintf(stderr, "test_time error\n");
+	if (mode == SINGLE) {
+		if (test_time(ctx, servername, size, iters, &routs, mode) < 0) {
+			fprintf(stderr, "test_time error\n");
+			return 1;
+		}
+	} else if (mode == MULTIPLE) {
+		if (test_time(ctx, servername, max_size, iters, &routs, mode) < 0) {
+			fprintf(stderr, "test_time error\n");
+			return 1;
+		}
+	} else {
+		fprintf(stderr, "Unknown mode\n");
 		return 1;
 	}
-
-	ibv_ack_cq_events(ctx->cq_s.cq, num_cq_events);
 
 	if (close_ctx(ctx))
 		return 1;
