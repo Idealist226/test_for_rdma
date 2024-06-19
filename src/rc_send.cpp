@@ -1,3 +1,8 @@
+/*
+ * BUILD COMMAND:
+ * g++ rc_send.cpp -o rc_send -libverbs
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
