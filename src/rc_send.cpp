@@ -644,8 +644,18 @@ int test_time(struct context *ctx, char *servername, unsigned int max_size, unsi
 		size = 2;
 	}
 
-	printf("RDMA Send Benchmark  \n");
-	printf("Connection type : %s\n","RC");
+	if (!servername) {
+		printf("************************************\n");
+		printf("* Waiting for client to connect... *\n");
+		printf("************************************\n");
+	}
+	printf("---------------------------------------------------------------------------------------\n");
+	printf("                    RDMA Send Benchmark\n");
+	printf("%-20s : %s\n", "Connection type", "RC");
+	printf("%-20s : %d\n", "Number of qps", 1);
+	printf("%-20s : %d\n", "RX depth", rx_depth);
+	printf("%-20s : %s\n", "Device", ibv_get_device_name(ctx->context->device));
+	printf("---------------------------------------------------------------------------------------\n");
 	printf("%-20s %-20s %-20s %-20s\n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)", "Latency(us)");
 	while(size <= max_size){
 		//start send
@@ -878,7 +888,8 @@ int main(int argc, char *argv[])
 	my_dest.qpn = ctx->qp->qp_num;
 	my_dest.psn = lrand48() & 0xffffff;
 	inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-	printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
+	printf("---------------------------------------------------------------------------------------\n");
+	printf("local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 	       my_dest.lid, my_dest.qpn, my_dest.psn, gid);
 
 	if (servername)
@@ -891,7 +902,7 @@ int main(int argc, char *argv[])
 		return 1;
 
 	inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-	printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
+	printf("remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 	       rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
 	if (servername)

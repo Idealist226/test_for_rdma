@@ -765,8 +765,14 @@ int test_time(struct context *ctx, int iters, int *routs)
 void print_time() {
 	int size = LATENCY_SIZE, i = 0;
 
-	printf("RDMA Send Benchmark  \n");
-	printf("Connection type : %s\n","RC");
+	printf("---------------------------------------------------------------------------------------\n");
+	printf("                    RDMA Send Sched Benchmark\n");
+	printf("%-20s : %s\n", "Connection type", "RC");
+	printf("%-20s : %d\n", "Number of qps", 2);
+	printf("%-20s : %d\n", "RX depth", rx_depth);
+	printf("%-20s : %s\n", "Device", ibv_get_device_name(ib_dev));
+	printf("%-20s : %d\n", "Priority", priority);
+	printf("---------------------------------------------------------------------------------------\n");
 	printf("%-20s %-20s %-20s %-20s %-20s %-20s %-20s\n", "#iterations", "#bytes[Lat App]", "BW[Gbps]", "Lat[us]",
 		"#bytes[Bw App]", "Bandwidth[Gbps]", "Latency[us]");
 
@@ -872,7 +878,7 @@ void scheduler_thread()
 			std::pair<struct context*, int> element = bandwidth_que.front();
 			bandwidth_que.pop();
 			lock.unlock();
-			
+
 			if (post_send(element.first, element.second)) {
 				fprintf(stderr, "Couldn't post_send_send bandwidth\n");
 				return;
@@ -1023,6 +1029,9 @@ int main(int argc, char *argv[])
 			sched_thread.join();
 		}
 	} else {
+		printf("************************************\n");
+		printf("* Waiting for client to connect... *\n");
+		printf("************************************\n");
 		std::thread recv_bandwidth_thread(send_recv_thread, BANDWIDTH);
 		std::thread recv_latency_thread(send_recv_thread, LATENCY);
 
