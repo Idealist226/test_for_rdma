@@ -608,6 +608,10 @@ int post_recv_poll(struct context *ctx, int *routs, unsigned int iters)
 	struct ibv_wc wc[wc_count];
 
 	while (rcnt < iters) {
+		// 如果剩下的 iters-rcnt 小于 wc_count, 则动态减小 wc_count
+		if (iters - rcnt < wc_count)
+			wc_count = iters - rcnt;
+
 		if (*routs < wc_count) {
 			*routs += post_recv(ctx, ctx->rx_depth - *routs);
 			if (*routs < ctx->rx_depth) {
@@ -839,7 +843,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	ctx = init_ctx(ib_dev, size<=0?max_size:size, rx_depth, ib_port);
+	ctx = init_ctx(ib_dev, mode==MULTIPLE?max_size:size, rx_depth, ib_port);
 	if (!ctx)
 		return 1;
 

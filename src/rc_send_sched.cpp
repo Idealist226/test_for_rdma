@@ -19,9 +19,12 @@
 #include <infiniband/verbs.h>
 #include <thread>
 #include <queue>
+#include <utility>
+#include <mutex>
+#include <atomic>
 
 #define LATENCY_SIZE    4
-#define BANDWITH_SIZE   8192
+#define BANDWITH_SIZE   524288
 
 #define LATENCY_PORT	18515
 #define BANDWIDTH_PORT	18516
@@ -70,16 +73,23 @@ struct ibv_device	*ib_dev;
 char				*ib_devname = NULL;
 char				*servername = NULL;
 int					ib_port = 1;
-int					size = 4096;
+int					size = 0;
 enum ibv_mtu		mtu = IBV_MTU_1024;
 unsigned int		rx_depth = 512;
 unsigned int		iters = 1000;
 int					sl = 0;
 int					gidx = -1;
 char				gid[33];
+unsigned int		max_size = BANDWITH_SIZE;
 enum app_type		priority = NO_TYPE;
-std::queue<struct context*> latency_que;
-std::queue<struct context*> bandwidth_que;
+std::queue<std::pair<struct context*, int>> latency_que;
+std::mutex latque_mtx;
+std::queue<std::pair<struct context*, int>> bandwidth_que;
+std::mutex bwque_mtx;
+std::atomic<bool> stopFlag(false);
+double lat[25][2];
+double bw[25][2];
+std::mutex print_mtx;
 
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
 {
@@ -118,7 +128,7 @@ enum ibv_mtu mtu_to_enum(int mtu)
 	}
 }
 
-enum app_type prioty_to_enum(int pri)
+enum app_type priority_to_enum(int pri)
 {
 	switch (pri) {
 	case 1:
@@ -128,7 +138,7 @@ enum app_type prioty_to_enum(int pri)
 		printf("priority: BANDWIDTH\n");
 		return BANDWIDTH;
 	default:
-		printf("priority: BANDWIDTH\n");
+		printf("priority: NO_TYPE\n");
 		return NO_TYPE;
 	}
 }
@@ -549,12 +559,12 @@ static int post_recv(struct context *ctx, int n)
 	return i;
 }
 
-static int post_send(struct context *ctx)
+static int post_send(struct context *ctx, int size)
 {
 	struct ibv_sge list;
 	memset(&list, 0, sizeof(list));
 	list.addr	= (uintptr_t) ctx->buf;
-	list.length = ctx->size;
+	list.length = size;
 	list.lkey	= ctx->mr->lkey;
 
 	struct ibv_send_wr wr;
@@ -576,6 +586,27 @@ static int post_send(struct context *ctx)
 	return ibv_post_send(ctx->qp, &wr, &bad_wr);
 }
 
+int poll_cq(struct context * ctx, int nums){
+	struct ibv_wc wc[nums];
+	uint32_t nums_cqe = 0;
+	while(nums_cqe < nums){
+		int cqes = ibv_poll_cq(ctx->cq_s.cq, nums, wc);
+		if(cqes < 0 ){
+			 fprintf(stderr, "poll cq error. nums_cqe %d\n",nums_cqe);
+			 return -1 ;
+		}
+		nums_cqe += cqes;
+		for(int j  = 0;j < cqes; ++j){
+			if (wc[j].status != IBV_WC_SUCCESS) {
+			    fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+			            ibv_wc_status_str(wc[j].status), wc[j].status, (int)wc[j].wr_id);
+			    return -1;
+			}
+		}
+	}
+	return nums_cqe;
+}
+
 static void usage(const char *argv0)
 {
 	printf("Usage:\n");
@@ -594,81 +625,72 @@ static void usage(const char *argv0)
 	printf("  -p, --priority		 Prioritize running applications of specified types\n");
 }
 
-int post_send_poll(struct context *ctx, int count)
+int post_send_poll(struct context *ctx, unsigned int iters, unsigned int size)
 {
-	int send = 0, poll = 0;
+	int i, nums_cqe = 0;
 	int wc_count = 50;
 
-	if (priority == NO_TYPE) {
-		for (send = 0; send < count; send++) {
-			if (post_send(ctx)) {
+	for (i = 1; i <= iters; i++) {
+		if (priority == NO_TYPE) {
+			if (post_send(ctx, size)) {
 				fprintf(stderr, "Couldn't post send\n");
-				return 1;
+				printf("nums_cqe %d iter %d \n",nums_cqe,i);
+				return -1;
 			}
-		}
-	} else if (priority == LATENCY) {
-		for (send = 0; send < count; send++) {
+		} else if (priority == LATENCY) {
 			if (ctx->app_type == LATENCY) {
-				if (post_send(ctx)) {
+				if (post_send(ctx, size)) {
 					fprintf(stderr, "Couldn't post send\n");
-					return 1;
-				}
-			} else if (ctx->app_type == BANDWIDTH) {
-				bandwidth_que.push(ctx);
-			} else {
-				fprintf(stderr, "app_type error\n");
-				return 1;
-			}
-		}
-	} else if (priority == BANDWIDTH) {
-		for (send = 0; send < count; send++) {
-			if (ctx->app_type == LATENCY) {
-				latency_que.push(ctx);
-			} else if (ctx->app_type == BANDWIDTH) {
-				if (post_send(ctx)) {
-					fprintf(stderr, "Couldn't post send\n");
-					return 1;
+					printf("nums_cqe %d iter %d \n",nums_cqe,i);
+					return -1;
 				}
 			} else {
-				fprintf(stderr, "app_type error\n");
-				return 1;
+				std::unique_lock<std::mutex> lock(bwque_mtx);
+				bandwidth_que.push(std::make_pair(ctx, size));
+				lock.unlock();
 			}
+		} else {
+			printf("priority type error\n");
 		}
-	} else {
-		fprintf(stderr, "priority type error\n");
-	}
 
-	for (poll = 0; poll < count;) {
-		int ne = 0;
-		struct ibv_wc wc[wc_count];
-		do {
-			ne = ibv_poll_cq(ctx->cq_s.cq, wc_count, wc);
-			if (ne < 0) {
-				fprintf(stderr, "poll CQ failed %d\n", ne);
-				return 1;
+		if (i % wc_count == 0) {
+			int ret = poll_cq(ctx, wc_count);
+			if(ret < 0){
+				perror("error in poll");
+				return -1;
 			}
-			// if (ne > 0) {
-			// 	if (ctx->app_type == LATENCY) {
-			// 		printf("a:%d ", ne);
-			// 	} else if (ctx->app_type == BANDWIDTH) {
-			// 		printf("b:%d ", ne);
-			// 	}
-			// }
-		} while (ne < 1);
-		poll += ne;
+			nums_cqe += ret;
+		}
 	}
-	printf("%d: send = %d, poll = %d\n", ctx->qp->qp_num, send, poll);
+	// 还剩下 iters % wc_count 个 cqe 没有 poll
+	if (iters % wc_count != 0) {
+		int ret = poll_cq(ctx, iters % wc_count);
+		if(ret < 0){
+			perror("error in poll");
+			return -1;
+		}
+		nums_cqe += ret;
+	}
 	return 0;
 }
 
-int post_poll_recv(struct context *ctx, int *routs, int iters)
+int post_recv_poll(struct context *ctx, int *routs, unsigned int iters)
 {
-	int rcnt = 0;
+	int rcnt = 0, wc_count = 50, ne;
+	struct ibv_wc wc[wc_count];
+
 	while (rcnt < iters) {
-		int ret;
-		int ne, i;
-		int wc_count = 50;
-		struct ibv_wc wc[wc_count];
+		// 如果剩下的 iters-rcnt 小于 wc_count, 则动态减小 wc_count
+		if (iters - rcnt < wc_count)
+			wc_count = iters - rcnt;
+
+		if (*routs < wc_count) {
+			*routs += post_recv(ctx, ctx->rx_depth - *routs);
+			if (*routs < ctx->rx_depth) {
+				fprintf(stderr, "Couldn't post receive (%d)\n", *routs);
+				return -1;
+			}
+		}
 
 		do {
 			ne = ibv_poll_cq(ctx->cq_s.cq, wc_count, wc);
@@ -678,64 +700,87 @@ int post_poll_recv(struct context *ctx, int *routs, int iters)
 			}
 		} while (ne < 1);
 		rcnt += ne;
-
 		*routs -= ne;
-		if (*routs < wc_count) {
-			*routs += post_recv(ctx, ctx->rx_depth - *routs);
-			if (*routs < ctx->rx_depth) {
-				fprintf(stderr, "Couldn't post receive (%d)\n", *routs);
-				return 1;
-			}
-		}
 	}
-	printf("%d: poll = %d\n", ctx->qp->qp_num, rcnt);
 	return 0;
 }
 
-int test_time(struct context *ctx, int size, int iters, int *routs)
+int test_time(struct context *ctx, int iters, int *routs)
 {
 	struct timeval start, end;
 	int rx_depth = ctx->rx_depth;
-	if (gettimeofday(&start, NULL)) {
-		perror("gettimeofday");
-		return 1;
-	}
-
-	if (servername) {
-		for (int i = 0; i < iters / rx_depth; i++) {
-			if (post_send_poll(ctx, rx_depth)) {
+	unsigned int size = LATENCY_SIZE;
+	int i = 0;
+	
+	while (size <= max_size) {
+		//start send
+		if (gettimeofday(&start, NULL)) {
+			perror("gettimeofday");
+			return -1;
+		}
+		
+		if (servername) {
+			if (post_send_poll(ctx, iters, ctx->app_type==LATENCY?LATENCY_SIZE:size) < 0) {
 				fprintf(stderr, "Couldn't post_send_poll1\n");
-				return 1;
+				return -1;
+			}
+		} else {
+			if (post_recv_poll(ctx, routs, iters) < 0) {
+				fprintf(stderr, "Couldn't post_recv_poll\n");
+				return -1;
 			}
 		}
-		if (post_send_poll(ctx, iters % rx_depth)) {
-			fprintf(stderr, "Couldn't post_send_poll2\n");
-			return 1;
+
+		//end send
+		if (gettimeofday(&end, NULL)) {
+			perror("gettimeofday");
+			return -1;
 		}
-	} else {
-		if (post_poll_recv(ctx, routs, iters)) {
-			fprintf(stderr, "Couldn't post_poll_recv\n");
-			return 1;
+
+		// record test time
+		std::unique_lock<std::mutex> lock(print_mtx);
+		if (ctx->app_type == LATENCY) {
+			lat[i][0] = (end.tv_sec - start.tv_sec) * 1000000 +
+				(end.tv_usec - start.tv_usec);
+			long long bytes = (long long) LATENCY_SIZE * iters;
+			bw[i][0] = bytes*8.0/(lat[i][0])/1000;
+		} else {
+			lat[i][1] = (end.tv_sec - start.tv_sec) * 1000000 +
+				(end.tv_usec - start.tv_usec);
+			long long bytes = (long long) size * iters;
+			bw[i][1] = bytes*8.0/(lat[i][1])/1000;
 		}
-	}
-	// printf("routs = %d\n", *routs);
+		lock.unlock();
 
-	if (gettimeofday(&end, NULL)) {
-		perror("gettimeofday");
-		return 1;
-	}
-
-	{
-		float usec = (end.tv_sec - start.tv_sec) * 1000000 +
-			(end.tv_usec - start.tv_usec);
-		long long bytes = (long long) size * iters;
-
-		printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
-		       bytes, usec / 1000000., bytes * 8. / usec);
-		printf("%d iters in %.2f seconds = %.2f usec/iter\n",
-		       iters, usec / 1000000., usec / iters);
+		if(size < max_size && size*2 > max_size){
+			size = max_size;
+		}else{
+			size *= 2;
+		}
+		i++;
 	}
 	return 0;
+}
+
+void print_time() {
+	int size = LATENCY_SIZE, i = 0;
+
+	printf("RDMA Send Benchmark  \n");
+	printf("Connection type : %s\n","RC");
+	printf("%-20s %-20s %-20s %-20s %-20s %-20s %-20s\n", "#iterations", "#bytes[Lat App]", "BW[Gbps]", "Lat[us]",
+		"#bytes[Bw App]", "Bandwidth[Gbps]", "Latency[us]");
+
+	while (size <= max_size) {
+		printf("%-20d %-20d %-20.3lf %-20.0f %-20d %-20.3lf %-20.0f\n", 
+			iters, LATENCY_SIZE, bw[i][0], lat[i][0], size, bw[i][1], lat[i][1]);
+
+		if(size < max_size && size*2 > max_size){
+			size = max_size;
+		}else{
+			size *= 2;
+		}
+		i++;
+	}
 }
 
 void send_recv_thread(enum app_type type)
@@ -745,10 +790,9 @@ void send_recv_thread(enum app_type type)
 	struct dest		*rem_dest;
 	int				routs = 0;
 	int				rcnt, scnt;
-	int size = type == LATENCY ? LATENCY_SIZE : BANDWITH_SIZE;
 	int port = type == LATENCY ? LATENCY_PORT : BANDWIDTH_PORT;
 
-    ctx = init_ctx(ib_dev, size, rx_depth, ib_port);
+    ctx = init_ctx(ib_dev, max_size, rx_depth, ib_port);
 	if (!ctx) {
         fprintf(stderr, "Couldn't create ctx\n");
         return;
@@ -786,8 +830,6 @@ void send_recv_thread(enum app_type type)
 	my_dest.qpn = ctx->qp->qp_num;
 	my_dest.psn = lrand48() & 0xffffff;
 	inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-	printf("  type %d: local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-	       type, my_dest.lid, my_dest.qpn, my_dest.psn, gid);
 
 	if (servername)
 		rem_dest = client_exch_dest(servername, port, &my_dest);
@@ -801,8 +843,6 @@ void send_recv_thread(enum app_type type)
 	}
 
 	inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-	printf("  type %d: remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-	       type, rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
 	if (servername)
 		if (connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest,
@@ -811,8 +851,7 @@ void send_recv_thread(enum app_type type)
 			return;
 		}
 
-	// int iter = type == LATENCY ? iters : rx_depth;
-	if (test_time(ctx, size, iters, &routs)) {
+	if (test_time(ctx, iters, &routs) < 0) {
 		fprintf(stderr, "test_time error\n");
 		return;
 	}
@@ -824,35 +863,37 @@ void send_recv_thread(enum app_type type)
 
 void scheduler_thread()
 {
-	int i = 0;
-	int n = iters;
 	printf("scheduler_thread come in\n");
-	if (priority == LATENCY) {
-		while (i < n) {
-			if (!bandwidth_que.empty()) {
-				struct context *ctx = bandwidth_que.front();
-				bandwidth_que.pop();
-				if (post_send(ctx)) {
-					fprintf(stderr, "Couldn't post_send_send bandwidth\n");
-					return;
-				}
-				i++;
+	// if (priority == LATENCY) {
+	int i = 0;
+	while (!stopFlag) {
+		if (!bandwidth_que.empty()) {
+			std::unique_lock<std::mutex> lock(bwque_mtx);
+			std::pair<struct context*, int> element = bandwidth_que.front();
+			bandwidth_que.pop();
+			lock.unlock();
+			
+			if (post_send(element.first, element.second)) {
+				fprintf(stderr, "Couldn't post_send_send bandwidth\n");
+				return;
 			}
 		}
-	} else if (priority == BANDWIDTH) {
-		while (i < n) {
-			if (!latency_que.empty()) {
-				struct context *ctx = latency_que.front();
-				latency_que.pop();
-				if (post_send(ctx)) {
-					fprintf(stderr, "Couldn't post send latency\n");
-				}
-				i++;
-			}
-		}
-	} else {
-		fprintf(stderr, "priority type error\n");
 	}
+	// } else if (priority == BANDWIDTH) {
+	// 	while (i < n) {
+	// 		if (!latency_que.empty()) {
+	// 			struct context *ctx = latency_que.front();
+	// 			latency_que.pop();
+	// 			if (post_send(ctx)) {
+	// 				fprintf(stderr, "Couldn't post send latency\n");
+	// 			}
+	// 			i++;
+	// 		}
+	// 	}
+	// } else {
+	// 	fprintf(stderr, "priority type error\n");
+	// }
+	return;
 }
 
 int main(int argc, char *argv[])
@@ -876,7 +917,7 @@ int main(int argc, char *argv[])
 			{ NULL,		  0, NULL, 0 }  // 结尾元素，必要以表示数组结束
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:oOPtcjN",
+		c = getopt_long(argc, argv, "d:i:s:m:r:n:l:g:p:",
 				long_options, NULL);
 
 		if (c == -1)
@@ -896,7 +937,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case 's':
-			size = strtoul(optarg, NULL, 0);
+			max_size = strtoul(optarg, NULL, 0);
 			break;
 
 		case 'm':
@@ -924,7 +965,7 @@ int main(int argc, char *argv[])
 			break;
 		
 		case 'p':
-			priority = prioty_to_enum(strtol(optarg, NULL, 0));
+			priority = priority_to_enum(strtol(optarg, NULL, 0));
 			break;
 
 		default:
@@ -974,11 +1015,13 @@ int main(int argc, char *argv[])
 		std::thread bandwidth_thread(send_recv_thread, BANDWIDTH);
 		std::thread latency_thread(send_recv_thread, LATENCY);
         
+		bandwidth_thread.join();
+		latency_thread.join();
+		// 设置标志位以通知线程停止
+		stopFlag = true;
 		if (priority != NO_TYPE && sched_thread.joinable()) {
 			sched_thread.join();
 		}
-		bandwidth_thread.join();
-		latency_thread.join();
 	} else {
 		std::thread recv_bandwidth_thread(send_recv_thread, BANDWIDTH);
 		std::thread recv_latency_thread(send_recv_thread, LATENCY);
@@ -986,6 +1029,7 @@ int main(int argc, char *argv[])
 		recv_bandwidth_thread.join();
 		recv_latency_thread.join();
 	}
+	print_time();
 
 	ibv_free_device_list(dev_list);
 	return 0;

@@ -15,7 +15,7 @@ set(CMAKE_BUILD_TYPE Release) # or debug if you need to use gdb on it.
 # Some how g++ has better performance than clang++. Of course I don't know all flags for clang++.
 # set(CMAKE_CXX_COMPILER g++) # or clang++
 #set(CMAKE_CXX_COMPILER clang++) # or clang++
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Ofast -ffast-math -funroll-loops -march=native") # get crazy here
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g") # get crazy here
 #add_compile_options("-std=c++17")
 #set(CMAKE_CXX_FLAGS "-O0  -ggdb")
 
@@ -27,7 +27,7 @@ link_libraries( ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY} ${PTHREAD_LIBRARY} )
 
 add_executable(rc_pingpong ${PROJECT_SOURCE_DIR}/rc_pingpong.cpp)
 add_executable(rc_send ${PROJECT_SOURCE_DIR}/rc_send.cpp)
-add_executable(rc_send_sched ${PROJECT_SOURCE_DIR}/rc_send.cpp)
+add_executable(rc_send_sched ${PROJECT_SOURCE_DIR}/rc_send_sched.cpp)
 
 # add_executable(rc_write ${PROJECT_SOURCE_DIR}/rc_write.c)
 # add_executable(rc_read ${PROJECT_SOURCE_DIR}/rc_read.c)
