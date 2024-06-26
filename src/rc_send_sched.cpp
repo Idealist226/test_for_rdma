@@ -81,6 +81,7 @@ int					sl = 0;
 int					gidx = -1;
 char				gid[33];
 unsigned int		max_size = BANDWITH_SIZE;
+unsigned int		min_size = LATENCY_SIZE;
 enum app_type		priority = NO_TYPE;
 std::queue<std::pair<struct context*, int>> latency_que;
 std::mutex latque_mtx;
@@ -616,7 +617,8 @@ static void usage(const char *argv0)
 	printf("Options:\n");
 	printf("  -d, --ib-dev=<dev>     use IB device <dev> (default first device found)\n");
 	printf("  -i, --ib-port=<port>   use port <port> of IB device (default 1)\n");
-	printf("  -s, --size=<size>      size of message to exchange (default 4096)\n");
+	printf("  -u, --max_size=<size>  maximum size of message to exchange (default 524288)\n");
+	printf("  -l, --min_size=<size>  minimum size of message to exchange (default 2)\n");
 	printf("  -m, --mtu=<size>       path MTU (default 1024)\n");
 	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 500)\n");
 	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
@@ -709,7 +711,7 @@ int test_time(struct context *ctx, int iters, int *routs)
 {
 	struct timeval start, end;
 	int rx_depth = ctx->rx_depth;
-	unsigned int size = LATENCY_SIZE;
+	unsigned int size = min_size;
 	int i = 0;
 	
 	while (size <= max_size) {
@@ -720,7 +722,7 @@ int test_time(struct context *ctx, int iters, int *routs)
 		}
 		
 		if (servername) {
-			if (post_send_poll(ctx, iters, ctx->app_type==LATENCY?LATENCY_SIZE:size) < 0) {
+			if (post_send_poll(ctx, iters, ctx->app_type==LATENCY?min_size:size) < 0) {
 				fprintf(stderr, "Couldn't post_send_poll1\n");
 				return -1;
 			}
@@ -742,7 +744,7 @@ int test_time(struct context *ctx, int iters, int *routs)
 		if (ctx->app_type == LATENCY) {
 			lat[i][0] = (end.tv_sec - start.tv_sec) * 1000000 +
 				(end.tv_usec - start.tv_usec);
-			long long bytes = (long long) LATENCY_SIZE * iters;
+			long long bytes = (long long) min_size * iters;
 			bw[i][0] = bytes*8.0/(lat[i][0])/1000;
 		} else {
 			lat[i][1] = (end.tv_sec - start.tv_sec) * 1000000 +
@@ -763,7 +765,7 @@ int test_time(struct context *ctx, int iters, int *routs)
 }
 
 void print_time() {
-	int size = LATENCY_SIZE, i = 0;
+	int size = min_size, i = 0;
 
 	printf("---------------------------------------------------------------------------------------\n");
 	printf("                    RDMA Send Sched Benchmark\n");
@@ -778,7 +780,7 @@ void print_time() {
 
 	while (size <= max_size) {
 		printf("%-20d %-20d %-20.3lf %-20.0f %-20d %-20.3lf %-20.0f\n", 
-			iters, LATENCY_SIZE, bw[i][0], lat[i][0], size, bw[i][1], lat[i][1]);
+			iters, min_size, bw[i][0], lat[i][0], size, bw[i][1], lat[i][1]);
 
 		if(size < max_size && size*2 > max_size){
 			size = max_size;
@@ -913,11 +915,11 @@ int main(int argc, char *argv[])
 			// { "port",     1, NULL, 'p' },
 			{ "ib-dev",   1, NULL, 'd' },
 			{ "ib-port",  1, NULL, 'i' },
-			{ "size",     1, NULL, 's' },
+			{ "max_size", 1, NULL, 'u' },
+			{ "min_size", 1, NULL, 'l' },
 			{ "mtu",      1, NULL, 'm' },
 			{ "rx-depth", 1, NULL, 'r' },
 			{ "iters",    1, NULL, 'n' },
-			{ "sl",       1, NULL, 'l' },
 			{ "gid-idx",  1, NULL, 'g' },
 			{ "priority", 1, NULL, 'p'},
 			{ NULL,		  0, NULL, 0 }  // 结尾元素，必要以表示数组结束
@@ -942,8 +944,12 @@ int main(int argc, char *argv[])
 			}
 			break;
 
-		case 's':
+		case 'u':
 			max_size = strtoul(optarg, NULL, 0);
+			break;
+
+		case 'l':
+			min_size = strtoul(optarg, NULL, 0);
 			break;
 
 		case 'm':
@@ -960,10 +966,6 @@ int main(int argc, char *argv[])
 
 		case 'n':
 			iters = strtoul(optarg, NULL, 0);
-			break;
-
-		case 'l':
-			sl = strtol(optarg, NULL, 0);
 			break;
 
 		case 'g':
