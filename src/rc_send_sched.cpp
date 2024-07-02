@@ -25,6 +25,7 @@
 
 #define LATENCY_SIZE    4
 #define BANDWITH_SIZE   524288
+// #define BANDWITH_SIZE   32768
 
 #define LATENCY_PORT	18515
 #define BANDWIDTH_PORT	18516
@@ -76,7 +77,8 @@ int					ib_port = 1;
 int					size = 0;
 enum ibv_mtu		mtu = IBV_MTU_1024;
 unsigned int		rx_depth = 512;
-unsigned int		iters = 1000;
+unsigned int		lat_iters = 1000;
+unsigned int		bw_iters = 1000;
 int					sl = 0;
 int					gidx = -1;
 char				gid[33];
@@ -133,13 +135,13 @@ enum app_type priority_to_enum(int pri)
 {
 	switch (pri) {
 	case 1:
-		printf("priority: LATENCY\n");
+		// printf("priority: LATENCY\n");
 		return LATENCY;
 	case 2:
-		printf("priority: BANDWIDTH\n");
+		// printf("priority: BANDWIDTH\n");
 		return BANDWIDTH;
 	default:
-		printf("priority: NO_TYPE\n");
+		// printf("priority: NO_TYPE\n");
 		return NO_TYPE;
 	}
 }
@@ -617,14 +619,13 @@ static void usage(const char *argv0)
 	printf("Options:\n");
 	printf("  -d, --ib-dev=<dev>     use IB device <dev> (default first device found)\n");
 	printf("  -i, --ib-port=<port>   use port <port> of IB device (default 1)\n");
-	printf("  -u, --max_size=<size>  maximum size of message to exchange (default 524288)\n");
-	printf("  -l, --min_size=<size>  minimum size of message to exchange (default 2)\n");
+	printf("  -u, --max_size=<size>  maximum size of message to exchange (default 32768)\n");
+	printf("  -l, --min_size=<size>  minimum size of message to exchange (default 4)\n");
 	printf("  -m, --mtu=<size>       path MTU (default 1024)\n");
-	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 500)\n");
+	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 512)\n");
 	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
-	printf("  -l, --sl=<sl>          service level value\n");
 	printf("  -g, --gid-idx=<gid index> local port gid index\n");
-	printf("  -p, --priority		 Prioritize running applications of specified types\n");
+	printf("  -p, --priority         Prioritize running applications of specified types\n");
 }
 
 int post_send_poll(struct context *ctx, unsigned int iters, unsigned int size)
@@ -711,7 +712,7 @@ int test_time(struct context *ctx, int iters, int *routs)
 {
 	struct timeval start, end;
 	int rx_depth = ctx->rx_depth;
-	unsigned int size = min_size;
+	unsigned int size = LATENCY_SIZE;
 	int i = 0;
 	
 	while (size <= max_size) {
@@ -765,22 +766,22 @@ int test_time(struct context *ctx, int iters, int *routs)
 }
 
 void print_time() {
-	int size = min_size, i = 0;
+	int size = LATENCY_SIZE, i = 0;
 
-	printf("---------------------------------------------------------------------------------------\n");
+	printf("=======================================================================================\n");
 	printf("                    RDMA Send Sched Benchmark\n");
 	printf("%-20s : %s\n", "Connection type", "RC");
 	printf("%-20s : %d\n", "Number of qps", 2);
 	printf("%-20s : %d\n", "RX depth", rx_depth);
 	printf("%-20s : %s\n", "Device", ibv_get_device_name(ib_dev));
 	printf("%-20s : %d\n", "Priority", priority);
-	printf("---------------------------------------------------------------------------------------\n");
-	printf("%-20s %-20s %-20s %-20s %-20s %-20s %-20s\n", "#iterations", "#bytes[Lat App]", "BW[Gbps]", "Lat[us]",
-		"#bytes[Bw App]", "Bandwidth[Gbps]", "Latency[us]");
+	printf("=======================================================================================\n");
+	printf("%-20s %-20s %-20s %-20s %-20s %-20s %-20s %-20s\n", "#lat_iters", "#bytes[Lat App]", "BW[Gbps]", "Lat/iter[us]",
+		"#bw_iters", "#bytes[Bw App]", "BW[Gbps]", "Lat/iter[us]");
 
 	while (size <= max_size) {
-		printf("%-20d %-20d %-20.3lf %-20.0f %-20d %-20.3lf %-20.0f\n", 
-			iters, min_size, bw[i][0], lat[i][0], size, bw[i][1], lat[i][1]);
+		printf("%-20d %-20d %-20.3lf %-20.2f %-20d %-20d %-20.3lf %-20.2f\n", 
+			lat_iters, min_size, bw[i][0], lat[i][0]/lat_iters, bw_iters, size, bw[i][1], lat[i][1]/bw_iters);
 
 		if(size < max_size && size*2 > max_size){
 			size = max_size;
@@ -859,7 +860,7 @@ void send_recv_thread(enum app_type type)
 			return;
 		}
 
-	if (test_time(ctx, iters, &routs) < 0) {
+	if (test_time(ctx, type==LATENCY?lat_iters:bw_iters, &routs) < 0) {
 		fprintf(stderr, "test_time error\n");
 		return;
 	}
@@ -871,7 +872,6 @@ void send_recv_thread(enum app_type type)
 
 void scheduler_thread()
 {
-	printf("scheduler_thread come in\n");
 	// if (priority == LATENCY) {
 	int i = 0;
 	while (!stopFlag) {
@@ -919,13 +919,14 @@ int main(int argc, char *argv[])
 			{ "min_size", 1, NULL, 'l' },
 			{ "mtu",      1, NULL, 'm' },
 			{ "rx-depth", 1, NULL, 'r' },
-			{ "iters",    1, NULL, 'n' },
+			{ "lat_iters", 1, NULL, 't' },
+			{ "bw_iters", 1, NULL, 'b' },
 			{ "gid-idx",  1, NULL, 'g' },
 			{ "priority", 1, NULL, 'p'},
 			{ NULL,		  0, NULL, 0 }  // 结尾元素，必要以表示数组结束
 		};
 
-		c = getopt_long(argc, argv, "d:i:s:m:r:n:l:g:p:",
+		c = getopt_long(argc, argv, "d:i:u:m:r:l:g:p:t:b:",
 				long_options, NULL);
 
 		if (c == -1)
@@ -964,8 +965,12 @@ int main(int argc, char *argv[])
 			rx_depth = strtoul(optarg, NULL, 0);
 			break;
 
-		case 'n':
-			iters = strtoul(optarg, NULL, 0);
+		case 't':
+			lat_iters = strtoul(optarg, NULL, 0);
+			break;
+
+		case 'b':
+			bw_iters = strtoul(optarg, NULL, 0);
 			break;
 
 		case 'g':

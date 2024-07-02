@@ -656,7 +656,7 @@ int test_time(struct context *ctx, char *servername, unsigned int max_size, unsi
 	printf("%-20s : %d\n", "RX depth", rx_depth);
 	printf("%-20s : %s\n", "Device", ibv_get_device_name(ctx->context->device));
 	printf("---------------------------------------------------------------------------------------\n");
-	printf("%-20s %-20s %-20s %-20s\n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)", "Latency(us)");
+	printf("%-20s %-20s %-20s %-20s\n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)", "Latency/iter(us)");
 	while(size <= max_size){
 		//start send
 		if (gettimeofday(&start, NULL)) {
@@ -688,7 +688,7 @@ int test_time(struct context *ctx, char *servername, unsigned int max_size, unsi
 				(end.tv_usec - start.tv_usec);
 			long long bytes = (long long) size * iters ;
 			double  bw = bytes*8.0/(usec)/1000;
-			printf("%-20d  %-20d   %-20.3lf %-20.0f\n", size, iters, bw, usec);
+			printf("%-20d  %-20d   %-20.3lf %-20.2f\n", size, iters, bw, usec/iters);
 		}
 
 		if(size < max_size && size*2 > max_size){
@@ -732,6 +732,7 @@ int main(int argc, char *argv[])
 	int			 gidx = -1;
 	char			 gid[33];
 	unsigned int	max_size = 524288;
+	// unsigned int	max_size = 32768;
 	enum bench_mode	mode = MULTIPLE;
 
 	srand48(getpid() * time(NULL));
