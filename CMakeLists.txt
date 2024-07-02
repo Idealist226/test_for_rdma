@@ -26,9 +26,10 @@ link_libraries( ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY} ${PTHREAD_LIBRARY} )
 
 
 add_executable(rc_pingpong ${PROJECT_SOURCE_DIR}/rc_pingpong.cpp)
+add_executable(rc_send_without_tune ${PROJECT_SOURCE_DIR}/rc_send_without_tune.cpp)
 add_executable(rc_send ${PROJECT_SOURCE_DIR}/rc_send.cpp)
 add_executable(rc_send_sched ${PROJECT_SOURCE_DIR}/rc_send_sched.cpp)
-
+add_executable(sched_bw ${PROJECT_SOURCE_DIR}/sched_bw.cpp)
 # add_executable(rc_write ${PROJECT_SOURCE_DIR}/rc_write.c)
 # add_executable(rc_read ${PROJECT_SOURCE_DIR}/rc_read.c)
 
