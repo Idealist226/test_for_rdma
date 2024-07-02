@@ -652,6 +652,21 @@ int post_send_poll(struct context *ctx, unsigned int iters, unsigned int size)
 				bandwidth_que.push(std::make_pair(ctx, size));
 				lock.unlock();
 			}
+		} else if (priority == BANDWIDTH) {
+			if (ctx->app_type == BANDWIDTH) {
+				if (post_send(ctx, size)) {
+					fprintf(stderr, "Couldn't post send\n");
+					printf("nums_cqe %d iter %d \n",nums_cqe,i);
+					return -1;
+				}
+				// std::unique_lock<std::mutex> lock(bwque_mtx);
+				// bandwidth_que.push(std::make_pair(ctx, size));
+				// lock.unlock();
+			} else {
+				std::unique_lock<std::mutex> lock(latque_mtx);
+				latency_que.push(std::make_pair(ctx, size));
+				lock.unlock();
+			}
 		} else {
 			printf("priority type error\n");
 		}
@@ -872,35 +887,57 @@ void send_recv_thread(enum app_type type)
 
 void scheduler_thread()
 {
-	// if (priority == LATENCY) {
+	// 定义1微秒的时间间隔
+	std::chrono::microseconds delay(1);
 	int i = 0;
-	while (!stopFlag) {
-		if (!bandwidth_que.empty()) {
-			std::unique_lock<std::mutex> lock(bwque_mtx);
-			std::pair<struct context*, int> element = bandwidth_que.front();
-			bandwidth_que.pop();
-			lock.unlock();
 
-			if (post_send(element.first, element.second)) {
-				fprintf(stderr, "Couldn't post_send_send bandwidth\n");
-				return;
+	if (priority == LATENCY) {
+		while (!stopFlag) {
+			if (!bandwidth_que.empty()) {
+				std::unique_lock<std::mutex> lock(bwque_mtx);
+				std::pair<struct context*, int> element = bandwidth_que.front();
+				bandwidth_que.pop();
+				lock.unlock();
+
+				if (post_send(element.first, element.second)) {
+					fprintf(stderr, "Couldn't post_send_send bandwidth\n");
+					return;
+				}
 			}
 		}
+	} else if (priority == BANDWIDTH) {
+		while (!stopFlag) {
+			// while (!bandwidth_que.empty()) {
+			// 	std::unique_lock<std::mutex> lock(bwque_mtx);
+			// 	std::pair<struct context*, int> element = bandwidth_que.front();
+			// 	bandwidth_que.pop();
+			// 	lock.unlock();
+
+			// 	if (post_send(element.first, element.second)) {
+			// 		fprintf(stderr, "Couldn't post_send_send bandwidth\n");
+			// 		return;
+			// 	}
+			// }
+			if (!latency_que.empty()) {
+				i++;
+				std::unique_lock<std::mutex> lock(latque_mtx);
+				std::pair<struct context*, int> element = latency_que.front();
+				latency_que.pop();
+				lock.unlock();
+
+				if (post_send(element.first, element.second)) {
+					fprintf(stderr, "Couldn't post_send_send bandwidth\n");
+					return;
+				}
+				if (i % 20 == 0) {
+					// 使用std::this_thread::sleep_for来延迟
+					std::this_thread::sleep_for(delay);
+				}
+			}
+		}
+	} else {
+		fprintf(stderr, "priority type error\n");
 	}
-	// } else if (priority == BANDWIDTH) {
-	// 	while (i < n) {
-	// 		if (!latency_que.empty()) {
-	// 			struct context *ctx = latency_que.front();
-	// 			latency_que.pop();
-	// 			if (post_send(ctx)) {
-	// 				fprintf(stderr, "Couldn't post send latency\n");
-	// 			}
-	// 			i++;
-	// 		}
-	// 	}
-	// } else {
-	// 	fprintf(stderr, "priority type error\n");
-	// }
 	return;
 }
 
